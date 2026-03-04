@@ -1,0 +1,7 @@
+# requirements.txt
+pydicom
+pyodbc
+openpyxl
+torch
+torchvision
+Pillow

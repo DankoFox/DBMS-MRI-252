@@ -1,0 +1,41 @@
+# Data
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*.sublime-*
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Docker
+mssql_data/
+*.dockerignore
+
+# Environment
+.env
+.env.local
+*.log
+*.tmp
+
+# SQL Server
+*.mdf
+*.ldf
+*.bak
