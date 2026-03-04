@@ -256,10 +256,11 @@ ORDER BY Distance ASC;
 
 ### Setup Steps
 
-1. **Start Database:** `docker-compose up -d`
-2. **Install Dependencies:** `pip install -r requirements.txt`
-3. **Initialize Schema:** Execute `sql/01_schema.sql` in SSMS or Azure Data Studio.
-4. **Load Data:** Run `python src/ingest.py` (Process 5-10 patients for demo speed).
+1. **Prepare Data:** Place your MRI DICOM files (`.ima`) in `data/01_MRI_Data/<PatientID>/` folders and the radiologist report Excel file at `data/Radiologists Report.xlsx`.
+2. **Start Database:** `docker-compose up -d`
+3. **Install Dependencies:** `pip install -r requirements.txt`
+4. **Initialize Schema:** Execute `sql/schema.sql` in SSMS or Azure Data Studio.
+5. **Load Data:** Run `python src/ingest.py`
 
 ### Presentation Talking Points
 
