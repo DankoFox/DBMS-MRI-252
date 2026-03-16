@@ -8,9 +8,9 @@ services:
       - ACCEPT_EULA=Y
       - MSSQL_SA_PASSWORD=YourStrongPassword123!
     volumes:
-      - mssql_data:/var/opt/mssql
-      # Map your host backup folder to a internal folder called /backups
-      - /mnt/DATA-DRIVE/Code/MRI_VECTORIZED_BACKUP:/backups 
+      # Direct bind mount to D: disk (create this folder first)
+      - /mnt/my_D_disk/Code/mri_mssql_data:/var/opt/mssql
+      # Your existing backup mount
+      - /mnt/my_D_disk/Code/MRI_VECTORIZED_BACKUP:/backups 
 
-volumes:
-  mssql_data:
+# Remove the volumes section entirely - no longer needed
