@@ -256,17 +256,20 @@ ORDER BY Distance ASC;
 
 ### Setup Steps
 
-1. **Prepare Data:** Place your MRI DICOM files (`.ima`) in `data/01_MRI_Data/<PatientID>/` folders and the radiologist report Excel file at `data/Radiologists Report.xlsx`.
-2. **Start Database:** `docker-compose up -d`
-3. **Install Dependencies:** `pip install -r requirements.txt`
-4. **Initialize Schema:** Execute `sql/schema.sql` in SSMS or Azure Data Studio.
-5. **Load Data:** Run `python src/ingest.py`
+1. **Configure Environment:** Create a `.env` file in the root directory (see `.env` for template) with your SQL Server credentials.
+2. **Prepare Data:** Place your MRI DICOM files (`.ima`) in `data/01_MRI_Data/<PatientID>/` folders and the radiologist report Excel file at `data/Radiologists Report.xlsx`.
+3. **Start Database:** `docker-compose up -d`
+4. **Install Dependencies:** `pip install -r requirements.txt`
+5. **Initialize Schema:** Execute `sql/schema.sql` and `sql/indexing.sql` in SSMS or Azure Data Studio.
+6. **Load Data:** Run `python src/ingest.py`
+7. **Visual Demo:** Run `python src/vector_search_app.py` to see the AI similarity results.
 
 ### Presentation Talking Points
 
 * **The "Why" of SQL 2025:** "We aren't just using the DB as storage; we've moved the AI logic into the data layer, reducing the need for heavy application-side math."
 * **ACID Compliance:** "By storing images in `VARBINARY`, a `ROLLBACK` removes both metadata and the binary file simultaneously—preventing 'orphaned' image files."
 * **Multi-Modal Querying:** "We are combining Clinical Notes (Text) with Visual Embeddings (AI) in a single, high-performance JOIN."
+* **Visual Verification:** "The `vector_search_app.py` proves that the DBMS isn't just returning random data; it's returning clinically similar visual slices based on DiskANN vector indexing."
 
 ---
 
