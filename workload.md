@@ -22,29 +22,196 @@
 
 ---
 
-## Member A — Indexing + Query Processing (4 points)
+## Indexing + Query Processing
 
 **Deliverables:** `sql/02_indexes.sql`, `sql/03_query_processing.sql`, `src/app_queries.py`
 
-### Indexing Tasks
+### A1. Primary Index (Clustered Index) Demo
 
-| Task | Detail |
-|------|--------|
-| A1. B-Tree Index demo | Query `MRIImages` by `SeriesType` WITHOUT index → `SET STATISTICS IO ON` → record logical reads (Table Scan). Create `CREATE INDEX idx_series ON MRIImages(SeriesType)` → re-run → record logical reads (Index Seek). Screenshot both. |
-| A2. Composite Index demo | Create `(PatientID, SliceNumber)` covering index. Show scan vs. seek difference. |
-| A3. DiskANN Vector Index | `CREATE VECTOR INDEX idx_mri_embeddings ON MRIImages(Embedding) WITH (DISTANCE_METRIC = 'COSINE')`. Compare `VECTOR_DISTANCE()` performance before/after. |
+| Step | Action | What to show |
+|------|--------|-------------|
+| 1 | Show `Patients` table already has a clustered index on `PatientID` (PK) | `sp_helpindex 'Patients'` — CLUSTERED, UNIQUE |
+| 2 | `SET STATISTICS IO ON` → `SELECT * FROM Patients WHERE PatientID = 250` | **Clustered Index Seek** — very few logical reads |
+| 3 | `SELECT * FROM Patients WHERE PatientID BETWEEN 100 AND 200` | **Clustered Index Seek (range)** — data physically ordered by PatientID |
+| 4 | Show execution plan | Annotate: Clustered Index Seek operator |
 
-### Query Processing Tasks
-
-| Task | Detail |
-|------|--------|
-| A4. Execution Plan analysis | Use `SET SHOWPLAN_XML ON` or SSMS visual plan for: (1) simple SELECT, (2) JOIN query (Patient + Images), (3) vector similarity query. Annotate operators: Table Scan, Index Seek, Nested Loop, Hash Match, Vector Distance. |
-| A5. Query optimization | Show how adding indexes changes the execution plan. Compare estimated vs. actual row counts. |
-| A6. Theory vs. Practice | Compare textbook B-Tree indexing with SQL Server's clustered/non-clustered index implementation. Compare theoretical KNN with DiskANN approximate nearest neighbor. |
+**Theory link:** Ch.2 — Primary Index is built on the ordering key field of an ordered file. Each block has one index entry (sparse/dense). SQL Server's **Clustered Index** is the practical equivalent: the leaf level IS the data (table rows physically sorted by the key). Only one clustered index per table, just like only one primary index per file.
 
 ---
 
-## Member B — Transactions (2 points)
+### A2. Secondary Index (Non-Clustered Index) Demo
+
+| Step | Action | What to show |
+|------|--------|-------------|
+| 1 | Query WITHOUT index: `SELECT * FROM MRIImages WHERE SeriesType = 'T1'` | **Table Scan** — high logical reads |
+| 2 | `CREATE NONCLUSTERED INDEX idx_series ON MRIImages(SeriesType)` | Create secondary index |
+| 3 | Re-run the same query | **Index Seek + Key Lookup** — low logical reads |
+| 4 | Compare `STATISTICS IO` output before/after | Screenshot both |
+
+**Theory link:** Ch.2 — Secondary Index is built on a non-ordering field. Dense index (one entry per record). SQL Server's **Non-Clustered Index** is the equivalent: leaf level contains index key + a bookmark (row locator) back to the clustered index. Multiple non-clustered indexes allowed per table, just like multiple secondary indexes.
+
+---
+
+### A3. Clustering Index Demo
+
+| Step | Action | What to show |
+|------|--------|-------------|
+| 1 | Show `MRIImages` has no clustered index on `SeriesType` | Non-unique, non-ordering → secondary index |
+| 2 | Create a new table or show: when clustered index is on a non-unique column, SQL Server adds a 4-byte uniquifier | Explain difference from textbook's clustering index on non-key field |
+| 3 | `SELECT SeriesType, COUNT(*) FROM MRIImages GROUP BY SeriesType` with clustered vs non-clustered | Show scan type difference |
+
+**Theory link:** Ch.2 — Clustering Index is on a non-key ordering field where multiple records can have the same value. SQL Server doesn't have a separate "clustering index" type — it uses the **clustered index** for this. If the clustered key is non-unique, SQL Server internally adds a uniquifier.
+
+---
+
+### A4. Composite (Multi-Column) Index Demo
+
+| Step | Action | What to show |
+|------|--------|-------------|
+| 1 | `CREATE INDEX idx_patient_slice ON MRIImages(PatientID, SliceNumber)` | Composite index |
+| 2 | `SELECT * FROM MRIImages WHERE PatientID = 100 AND SliceNumber = 5` | **Index Seek** — both columns used |
+| 3 | `SELECT * FROM MRIImages WHERE SliceNumber = 5` | **Index Scan** (not seek) — leading column not in WHERE |
+| 4 | `SELECT PatientID, SliceNumber FROM MRIImages WHERE PatientID = 100` | **Covering index** — no key lookup needed |
+
+**Theory link:** Ch.2 — Multilevel indexes use multiple levels of index entries. SQL Server's B+-Tree is inherently multilevel. Composite indexes demonstrate how the ordering of columns matters (leftmost prefix rule).
+
+---
+
+### A5. B-Tree / B+-Tree Index Structure
+
+| Step | Action | What to show |
+|------|--------|-------------|
+| 1 | `SELECT * FROM sys.dm_db_index_physical_stats(DB_ID(), OBJECT_ID('MRIImages'), NULL, NULL, 'DETAILED')` | Show index depth, page counts, fragmentation per level |
+| 2 | Explain: Root → Intermediate → Leaf levels | Diagram mapping to textbook B+-Tree structure |
+| 3 | Show `avg_fragmentation_in_percent` | Explain when/why to rebuild (`ALTER INDEX ... REBUILD`) |
+| 4 | `DBCC IND('MRIDatabase', 'MRIImages', 1)` | Show actual page chain of the index |
+
+**Theory link:** Ch.2 — B-Trees and B+-Trees are dynamic multilevel indexes. B+-Tree: all data pointers at leaf level, internal nodes only contain keys. SQL Server uses **B+-Trees** for ALL indexes (clustered and non-clustered). Key difference from textbook: SQL Server's leaf pages are doubly-linked (for range scans), and page splits happen automatically on insert.
+
+---
+
+### A6. DiskANN Vector Index Demo
+
+| Step | Action | What to show |
+|------|--------|-------------|
+| 1 | Without vector index: `SELECT TOP 5 ... ORDER BY VECTOR_DISTANCE('cosine', Embedding, @query_vec)` | Full scan of all 500×N embeddings — slow |
+| 2 | `CREATE VECTOR INDEX idx_mri_embeddings ON MRIImages(Embedding) WITH (DISTANCE_METRIC = 'COSINE')` | Create DiskANN index |
+| 3 | Re-run the same vector search | **Approximate Nearest Neighbor** — much faster |
+| 4 | Compare execution plans and `STATISTICS TIME` before/after | Annotate: Vector Index Scan operator |
+
+**Theory link:** Ch.2 doesn't cover vector indexes (it's a modern addition). This demonstrates how indexing concepts extend beyond traditional B-Trees. DiskANN is a graph-based ANN index — contrast with textbook's tree-based structures. Trade-off: approximate results (not exact KNN) for dramatically better performance.
+
+---
+
+### A7. Execution Plan Analysis (Query Processing)
+
+| Step | Action | What to show |
+|------|--------|-------------|
+| 1 | `SET SHOWPLAN_XML ON` or use SSMS "Include Actual Execution Plan" | Enable plan capture |
+| 2 | Simple SELECT: `SELECT * FROM Patients WHERE PatientID = 100` | **Clustered Index Seek** — single operator |
+| 3 | JOIN query: `SELECT p.*, m.SeriesType FROM Patients p JOIN MRIImages m ON p.PatientID = m.PatientID WHERE p.PatientID = 100` | **Nested Loop Join** (or Hash Match depending on data size) |
+| 4 | Aggregation: `SELECT PatientID, COUNT(*) FROM MRIImages GROUP BY PatientID` | **Hash Aggregate** or **Stream Aggregate** |
+| 5 | Subquery: `SELECT * FROM Patients WHERE PatientID IN (SELECT DISTINCT PatientID FROM MRIImages WHERE SeriesType = 'T1')` | Show how optimizer transforms subquery |
+
+**Theory link:** Ch.3 §1 — Query processing steps: parsing → optimization → execution. SQL Server's Query Optimizer performs the same logical steps. The execution plan is the visual representation of the chosen algorithm for each operation.
+
+---
+
+### A8. External Sorting Demo
+
+| Step | Action | What to show |
+|------|--------|-------------|
+| 1 | `SELECT * FROM MRIImages ORDER BY SeriesType` — check plan | **Sort** operator appears if no suitable index |
+| 2 | With index on SeriesType: `SELECT * FROM MRIImages ORDER BY SeriesType` | No Sort operator — data already ordered via index |
+| 3 | Memory grant info in execution plan | Show `MemoryGrant` in plan XML — SQL Server allocates memory for sort |
+
+**Theory link:** Ch.3 §3 — External sort-merge algorithm: divide file into runs, sort each in memory, merge. SQL Server's Sort operator does the same: if data fits in memory → in-memory quicksort; if not → tempdb spill (external sort). The `Sort Warnings` extended event fires when a spill occurs.
+
+---
+
+### A9. SELECT Algorithms Demo
+
+| Step | Action | What to show |
+|------|--------|-------------|
+| 1 | No index: `SELECT * FROM MRIImages WHERE SeriesType = 'T2'` | **Table Scan** (linear search — Algorithm S1) |
+| 2 | With B-Tree index on SeriesType | **Index Seek** (binary search — Algorithm S3a) |
+| 3 | With clustered index range: `WHERE PatientID BETWEEN 1 AND 50` | **Clustered Index Seek** (Algorithm S6 — range on ordering field) |
+| 4 | Conjunction: `WHERE SeriesType = 'T1' AND SliceNumber = 5` | Show if optimizer uses index intersection or composite index |
+
+**Theory link:** Ch.3 §4 — SELECT algorithms: S1 (linear search), S2 (binary search), S3 (primary index), S4 (primary index range), S6 (secondary index). SQL Server's optimizer automatically picks the best algorithm based on statistics and cost estimation.
+
+---
+
+### A10. JOIN Algorithms Demo
+
+| Step | Action | What to show |
+|------|--------|-------------|
+| 1 | Nested Loop: `SELECT * FROM Patients p JOIN MRIImages m ON p.PatientID = m.PatientID` (small outer table) | **Nested Loops** join operator in plan |
+| 2 | Hash Join: force with hint or use larger result set | **Hash Match** join operator |
+| 3 | Merge Join: both inputs sorted on join key | **Merge Join** operator (if optimizer chooses it) |
+| 4 | Compare costs in execution plan | % cost of each operator |
+
+**Theory link:** Ch.3 §4 — Join algorithms: J1 (Nested Loop), J2 (Single-loop with index), J3 (Sort-Merge), J4 (Hash Join). SQL Server implements all of these. The optimizer's cost-based decision maps directly to the textbook's cost formulas (block accesses, buffer size).
+
+---
+
+### A11. Heuristic & Cost-Based Optimization Demo
+
+| Step | Action | What to show |
+|------|--------|-------------|
+| 1 | Write a complex query with JOIN + WHERE + GROUP BY | Show the execution plan |
+| 2 | `SET SHOWPLAN_ALL ON` — show estimated rows, estimated cost | Cost-based optimization output |
+| 3 | Compare plan with and without `OPTION (FORCE ORDER)` | Shows optimizer reorders joins for efficiency (heuristic: push selection down) |
+| 4 | `UPDATE STATISTICS` on a table → re-run query → compare plan | Statistics drive cost estimation |
+
+**Theory link:** Ch.3 §8–9 — Heuristic optimization: push SELECTs down, push PROJECTs down, reorder joins. Cost-based: use selectivity of predicates and storage cost formulas to pick cheapest plan. SQL Server combines both: heuristic rules for initial plan space pruning, then cost-based search (using cardinality estimates from statistics) to find optimal plan.
+
+---
+
+### A12. Theory vs. Practice — Indexing (Ch.2)
+
+| Aspect | Theory (Textbook Ch.2) | SQL Server Practice |
+|--------|----------------------|-------------------|
+| **Primary Index** | Ordered file + sparse index on ordering key. One per file. | **Clustered Index**: leaf level = data rows sorted by key. One per table. |
+| **Clustering Index** | Index on non-key ordering field (duplicates allowed). | Clustered index on non-unique column → SQL Server adds a 4-byte **uniquifier** internally. |
+| **Secondary Index** | Dense index on non-ordering field. Multiple per file. | **Non-Clustered Index**: leaf = key + bookmark (RID or clustered key). Up to 999 per table. |
+| **Multilevel Index** | Multiple levels of index to reduce search space. | All SQL Server indexes are B+-Trees = inherently multilevel. `sys.dm_db_index_physical_stats` shows depth. |
+| **B-Tree** | Balanced tree, data pointers at all nodes. | SQL Server does NOT use B-Trees — only **B+-Trees**. |
+| **B+-Tree** | Data pointers only at leaf level. Internal nodes = keys only. Leaves linked. | Exact implementation: leaf pages doubly-linked for range scans. Internal pages contain keys + child page pointers. Automatic page splits on overflow. |
+| **Index storage** | Textbook discusses block factor, fan-out, levels formula: $t = \lceil \log_{fo}(b) \rceil$. | SQL Server: page size = 8KB. Fan-out depends on key size. `sys.dm_db_index_physical_stats` gives exact depth and page counts. |
+| **Dynamic updates** | B+-Tree handles inserts/deletes via split/merge. | Same: page splits on insert, ghost records on delete (lazy cleanup). Fragmentation tracked; `ALTER INDEX REBUILD` to defrag. |
+
+---
+
+### A13. Theory vs. Practice — Query Processing (Ch.3)
+
+| Aspect | Theory (Textbook Ch.3) | SQL Server Practice |
+|--------|----------------------|-------------------|
+| **Query processing steps** | Scanning/Parsing → Optimization → Code Generation → Execution. | Parsing → Algebrizer → Query Optimizer → Execution Engine. Same logical flow. |
+| **Relational algebra translation** | SQL → relational algebra tree → optimize tree. | SQL → query tree → logical operators → physical operators → execution plan. |
+| **External Sorting** | Sort-merge: create sorted runs in memory, merge passes. Cost = 2b × (1 + ⌈log_M(⌈b/M⌉)⌉). | Sort operator: in-memory quicksort if fits in memory grant; else spills to tempdb (external sort-merge). `Sort Warnings` event on spill. |
+| **SELECT algorithms** | S1 (linear), S2 (binary), S3 (primary index), S4 (primary index range), S6 (secondary). | Optimizer picks automatically: Table Scan, Clustered Index Scan/Seek, NonClustered Index Seek + Key Lookup, Index Intersection. |
+| **JOIN algorithms** | J1 (Nested Loop), J2 (index-based NL), J3 (Sort-Merge Join), J4 (Hash Join). | All four implemented: **Nested Loops**, **Merge Join**, **Hash Match**. Optimizer picks based on input sizes, sort order, memory. |
+| **PROJECT** | Remove duplicates via sorting or hashing. | **Stream Aggregate** (if sorted input) or **Hash Aggregate** (for DISTINCT). |
+| **Aggregate operations** | Sorting-based or hashing-based grouping. | **Stream Aggregate** (pre-sorted) or **Hash Match Aggregate**. Handles COUNT, SUM, AVG, etc. |
+| **Pipelining** | Pass tuples between operators without materializing. | SQL Server uses **iterator model**: each operator implements `Open()`, `GetNext()`, `Close()`. Rows flow tuple-by-tuple (pipelining by default). Blocking operators (Sort, Hash) must materialize. |
+| **Heuristic optimization** | Push selections down, push projections down, reorder joins by selectivity. | Optimizer applies transformation rules: predicate pushdown, join reordering, subquery unnesting, view merging. |
+| **Cost-based optimization** | Use selectivity, block accesses, buffer size to estimate cost of each plan. | Statistics (histograms, density vectors) on columns → **Cardinality Estimator** → cost formula per operator → search cheapest plan. `OPTION (RECOMPILE)` forces fresh optimization. |
+| **Selectivity** | $sl = 1/NDV$ for equality on key with NDV distinct values. | SQL Server uses multi-step histograms (up to 200 steps) + density vectors for selectivity estimates. `DBCC SHOW_STATISTICS` shows the histogram. |
+| **Oracle-specific (Ch.3 §10)** | Rule-based vs. cost-based optimizer in Oracle. | SQL Server has always been **cost-based only** (no rule-based mode). The equivalent of Oracle hints: SQL Server **query hints** (`OPTION`, `WITH (INDEX(...))`, `FORCESEEK`). |
+
+---
+
+**Summary for presentation:**
+- SQL Server indexes are ALL **B+-Trees** (not B-Trees) — covers primary, clustering, and secondary index concepts from Ch.2
+- The Query Optimizer implements all major algorithms from Ch.3 (NL Join, Merge Join, Hash Join, external sort)
+- SQL Server is purely **cost-based** optimization (no rule-based mode)
+- **Iterator/pipelining model** used by default — matches textbook's pipelining concept
+- Vector indexing (DiskANN) extends beyond textbook into modern approximate search
+
+---
+
+## Transactions 
 
 **Deliverables:** `sql/04_transactions.sql`
 
@@ -61,7 +228,7 @@
 
 ---
 
-## Member C — Concurrency Control (2 points)
+## Concurrency Control 
 
 **Deliverables:** `sql/05_concurrency.sql`
 
@@ -226,7 +393,7 @@
 
 ---
 
-## Member D — Report + Presentation (2 points)
+## Report + Presentation (2 points)
 
 **Deliverables:** Final report (PDF), presentation slides
 
@@ -239,33 +406,12 @@
 | D5. Q&A prep | Prepare answers for likely questions: Why SQL Server 2025? Why VECTOR type over application-side search? How does DiskANN compare to brute-force KNN? What isolation level would you use in production? |
 
 
----
-
-## Timeline (2-week sprint)
-
-```
-Week 1:
-  Day 1-2:  All members set up Docker + ingest data (verify pipeline works)
-  Day 2-4:  A → indexing scripts, B → transaction scripts, C → concurrency scripts
-  Day 4-5:  A → query processing, B/C → screenshots + theory comparison notes
-  Day 5-7:  D collects outputs, starts report draft
-
-Week 2:
-  Day 1-2:  A/B/C review each other's scripts, fix issues
-  Day 3-4:  D finishes report, all review
-  Day 5:    D builds slides, team rehearses presentation
-  Day 6:    Dry run with Q&A practice
-  Day 7:    Final polish + submission
-```
-
----
-
 ## Files To Be Created
 
 | File | Owner | Status |
 |------|-------|--------|
-| `sql/02_indexes.sql` | Member A | Not started |
-| `sql/03_query_processing.sql` | Member A | Not started |
+| `sql/02_indexes.sql` | Member A | **Created** |
+| `sql/03_query_processing.sql` | Member A | **Created** |
 | `sql/04_transactions.sql` | Member B | Not started |
 | `sql/05_concurrency.sql` | Member C | **Created** |
 | `src/app_queries.py` | Member A | Not started |

@@ -9,7 +9,7 @@
 --   and [Session 2] in the corresponding windows IN ORDER.
 -- ============================================================
 
-USE MRIDatabase;
+USE MRIDatabase; ddddd
 GO
 
 -- ************************************************************
