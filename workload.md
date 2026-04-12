@@ -211,20 +211,167 @@
 
 ---
 
-## Transactions 
+## Transactions
 
 **Deliverables:** `sql/04_transactions.sql`
 
-| Task | Detail |
-|------|--------|
-| B1. Basic ACID demo | `BEGIN TRAN` → insert a patient + images → `COMMIT`. Verify data exists. |
-| B2. Rollback demo | `BEGIN TRAN` → insert patient → insert partial images → simulate error → `ROLLBACK`. Prove zero partial records (atomicity). |
-| B3. SAVEPOINT demo | `BEGIN TRAN` → insert patient → `SAVE TRAN sp1` → insert images → error → `ROLLBACK TRAN sp1` → `COMMIT`. Show patient exists but images don't. |
-| B4. Implicit vs Explicit transactions | `SET IMPLICIT_TRANSACTIONS ON` — show auto-begin behavior. Compare with explicit `BEGIN TRAN`. |
-| B5. Error handling with TRY/CATCH | Wrap ingestion in `BEGIN TRY...BEGIN CATCH` with `XACT_STATE()` checks. |
-| B6. WAL (Write-Ahead Logging) | Query `sys.fn_dblog()` to show log records before/after a transaction. Explain theory of WAL vs. SQL Server's implementation. |
-| B7. Theory vs. Practice | Compare textbook ACID properties and WAL protocol with SQL Server's transaction log architecture. |
+### B1. Basic Transaction — COMMIT (ACID: Atomicity + Durability)
 
+| Step | Action | What to show |
+|------|--------|-------------|
+| 1 | Verify test patient does NOT exist: `SELECT COUNT(*) FROM Patients WHERE PatientID = 9999` | 0 rows — clean starting state |
+| 2 | `BEGIN TRANSACTION` → `INSERT INTO Patients (9999, ...)` → `INSERT INTO MRIImages (9999, ...)` | Two writes inside one transaction |
+| 3 | Inside transaction: `PRINT XACT_STATE()` | Returns **1** — transaction is in ACTIVE state (committable) |
+| 4 | `COMMIT TRANSACTION` | Transaction moves to COMMITTED state |
+| 5 | `SELECT ... FROM Patients WHERE PatientID = 9999` + `SELECT ... FROM MRIImages WHERE PatientID = 9999` | Both rows persist — **Durability** proven |
+
+**Theory link (Transaction & System Concepts):** Ch.4 — "A Transaction is a logical unit of database processing that includes one or more access operations (read, write, delete)." Transaction boundaries are marked by `begin_transaction` and `end_transaction`. SQL Server's `BEGIN TRAN` / `COMMIT` maps directly to these boundaries. The **ACID** property of **Durability** guarantees that once committed, changes survive any failure — SQL Server enforces this via Write-Ahead Logging (WAL), flushing log records to disk before the COMMIT returns.
+
+---
+
+### B2. ROLLBACK — Proving Atomicity (All-or-Nothing)
+
+| Step | Action | What to show |
+|------|--------|-------------|
+| 1 | `SELECT COUNT(*) FROM Patients` + `SELECT COUNT(*) FROM MRIImages` | Record baseline counts |
+| 2 | `BEGIN TRANSACTION` → `INSERT INTO Patients (8888, ...)` → `INSERT INTO MRIImages (8888, ...)` | Two writes in one transaction |
+| 3 | Inside transaction: `SELECT COUNT(*) FROM Patients WHERE PatientID = 8888` | Returns 1 — row visible inside ACTIVE transaction |
+| 4 | `ROLLBACK TRANSACTION` | Transaction moves ACTIVE → FAILED → TERMINATED |
+| 5 | `SELECT COUNT(*) FROM Patients WHERE PatientID = 8888` | Returns **0** — both inserts undone |
+| 6 | `SELECT COUNT(*) FROM MRIImages WHERE PatientID = 8888` | Returns **0** — zero partial records (Atomicity) |
+
+**Theory link (Desirable Properties — Atomicity):** Ch.4 — "rollback (or abort): signals that the transaction has ended unsuccessfully, so that any changes or effects that the transaction may have applied to the database must be undone." The **Atomicity** property mandates all-or-nothing execution. SQL Server traces backward through the transaction log to undo writes. This is the same mechanism used by `ingest.py` — on error, per-patient ROLLBACK ensures no "partial patient" records (metadata without images).
+
+---
+
+### B3. SAVEPOINT — Partial Rollback
+
+| Step | Action | What to show |
+|------|--------|-------------|
+| 1 | `BEGIN TRANSACTION` → `INSERT INTO Patients (7777, ...)` | Phase 1: insert patient (we want to KEEP this) |
+| 2 | `SAVE TRANSACTION SP_AfterPatient` | Create savepoint after patient insert |
+| 3 | `INSERT INTO MRIImages (7777, ..., slice 1)` → `INSERT INTO MRIImages (7777, ..., slice 2)` | Phase 2: insert images (we will UNDO this) |
+| 4 | `ROLLBACK TRANSACTION SP_AfterPatient` | Partial rollback — undo images only |
+| 5 | Inside transaction: verify patient exists (1) and images don't (0) | Partial undo confirmed |
+| 6 | `COMMIT TRANSACTION` | Outer transaction commits successfully |
+| 7 | `SELECT ... FROM Patients WHERE PatientID = 7777` → exists; `SELECT COUNT(*) FROM MRIImages WHERE PatientID = 7777` → 0 | Patient persists, images rolled back |
+
+**Theory link (Transaction & System Concepts):** Ch.4 — "undo: Similar to rollback except that it applies to a single operation rather than to a whole transaction." Savepoints implement partial undo within a transaction. Use case: insert patient metadata, then attempt image batch; if image batch fails, keep the patient but discard images. SQL Server's `SAVE TRANSACTION <name>` + `ROLLBACK TRANSACTION <name>` is the practical implementation of per-operation undo.
+
+---
+
+### B4. TRY/CATCH Error Handling with XACT_STATE()
+
+| Step | Action | What to show |
+|------|--------|-------------|
+| 1 | `SET XACT_ABORT ON` | Any runtime error automatically makes the transaction uncommittable |
+| 2 | `BEGIN TRY` → `BEGIN TRANSACTION` → insert patient 6666 (success) → insert patient 9999 (duplicate PK → error!) | PK violation triggers the CATCH block |
+| 3 | In CATCH: `PRINT ERROR_MESSAGE()` + `PRINT XACT_STATE()` | Error message shown; `XACT_STATE()` returns **-1** (uncommittable = FAILED state) |
+| 4 | `IF XACT_STATE() = -1` → `ROLLBACK TRANSACTION` | Must rollback — transaction is doomed |
+| 5 | `SELECT COUNT(*) FROM Patients WHERE PatientID = 6666` → 0 | Whole transaction rolled back — patient 6666 also undone (Atomicity) |
+
+**Theory link (Transaction States & System Concepts):** Ch.4 — Why recovery is needed: transaction/system errors (division by zero, overflow), local exception conditions, concurrency control enforcement (deadlock). The **Transaction State Diagram**: ACTIVE → PARTIALLY COMMITTED → COMMITTED (success path) or ACTIVE → FAILED → TERMINATED (failure path). SQL Server's `XACT_STATE()` maps directly: `1` = committable (≈ Active/Partially Committed), `-1` = uncommittable (≈ Failed, must ROLLBACK), `0` = no transaction (≈ Terminated).
+
+---
+
+### B5. Implicit vs Explicit Transactions (Transaction Support in SQL)
+
+| Step | Action | What to show |
+|------|--------|-------------|
+| 1 | **Autocommit mode** (default): `PRINT XACT_STATE()` | Returns 0 — no active transaction; each statement auto-commits |
+| 2 | `SET IMPLICIT_TRANSACTIONS ON` → `INSERT INTO Patients (5555, ...)` | SQL Server auto-begins a transaction on DML |
+| 3 | `PRINT XACT_STATE()` + `PRINT @@TRANCOUNT` | Returns 1, 1 — transaction is active (user must commit/rollback manually) |
+| 4 | `ROLLBACK` → `SET IMPLICIT_TRANSACTIONS OFF` | Clean up implicit mode |
+| 5 | **Explicit mode**: `BEGIN TRANSACTION` → `PRINT @@TRANCOUNT` → `ROLLBACK` | Most common in application code (e.g., `ingest.py`) |
+
+**Theory link (Transaction Support in SQL):** Ch.4 — "With SQL, there is no explicit Begin Transaction statement. Transaction initiation is done implicitly when particular SQL statements are encountered." + "Every transaction must have an explicit end statement, which is either a COMMIT or ROLLBACK." SQL Server offers three modes: (1) **Autocommit** (default — each statement is its own transaction), (2) **Implicit** (`SET IMPLICIT_TRANSACTIONS ON` — matches the SQL2 standard behavior: auto-begin on DML, but must manually COMMIT/ROLLBACK), (3) **Explicit** (`BEGIN TRAN ... COMMIT` — SQL Server's extension beyond the SQL standard, and the recommended approach for application code).
+
+---
+
+### B6. Transaction Log Inspection — WAL in Practice
+
+| Step | Action | What to show |
+|------|--------|-------------|
+| 1 | `CHECKPOINT` | Flush dirty pages — clean starting point for log inspection |
+| 2 | `BEGIN TRANSACTION` → `INSERT INTO Patients (4444, ...)` → `COMMIT TRANSACTION` | Perform a traceable transaction |
+| 3 | Query `sys.fn_dblog(NULL, NULL)` — show `[Current LSN]`, `[Transaction ID]`, `[Operation]`, `[AllocUnitName]` | Raw transaction log records visible |
+| 4 | Map log operations to theory: `LOP_BEGIN_XACT` → `[start_transaction, T]`, `LOP_INSERT_ROWS` → `[write_item, T, X, _, new]`, `LOP_COMMIT_XACT` → `[commit, T]`, `LOP_ABORT_XACT` → `[abort, T]` | Theory-to-practice mapping of log record types |
+| 5 | Show transaction lifecycle in log ordered by LSN | Full traceability of a transaction's log footprint |
+
+**Theory link (Transaction & System Concepts — System Log):** Ch.4 — "The log keeps track of all transaction operations that affect the values of database items." Log record types: `[start_transaction, T]`, `[write_item, T, X, old_value, new_value]`, `[read_item, T, X]`, `[commit, T]`, `[abort, T]`. "The log is kept on disk → not affected by any type of failure except for disk or catastrophic failure." Recovery principle: "undo the effect by tracing backward through the log" and "redo the effect by tracing forward through the log." SQL Server implements WAL via the `.ldf` file and uses an **ARIES-based** recovery algorithm: Phase 1 (Analysis) → Phase 2 (Redo) → Phase 3 (Undo) on crash restart.
+
+---
+
+### B7. Transaction States — XACT_STATE() Mapping to Theory
+
+| Step | Action | What to show |
+|------|--------|-------------|
+| 1 | Before any transaction: `PRINT @@TRANCOUNT` + `PRINT XACT_STATE()` | `0`, `0` — **No transaction** (≈ Terminated or never started) |
+| 2 | `BEGIN TRANSACTION` → `PRINT @@TRANCOUNT` + `PRINT XACT_STATE()` | `1`, `1` — **ACTIVE** state (committable) |
+| 3 | `COMMIT` | Transition: ACTIVE → PARTIALLY COMMITTED → COMMITTED → TERMINATED |
+| 4 | `SET XACT_ABORT ON` → `BEGIN TRY` → `BEGIN TRANSACTION` → `SELECT 1/0` (force error) | Division by zero triggers CATCH |
+| 5 | In CATCH: `PRINT XACT_STATE()` → `-1` | **FAILED** state (uncommittable — must ROLLBACK) |
+| 6 | `ROLLBACK` → `PRINT XACT_STATE()` → `0` | Back to **TERMINATED** state |
+
+**Theory link (Transaction States):** Ch.4 — State diagram: `BEGIN TRANSACTION` → ACTIVE ←(READ, WRITE); ACTIVE → `END TRANSACTION` → PARTIALLY COMMITTED → `COMMIT` → COMMITTED → TERMINATED. Failure path: ACTIVE (or PARTIALLY COMMITTED) → `ABORT` → FAILED → TERMINATED. SQL Server's `XACT_STATE()` provides a runtime query of this state machine: `0` = no transaction (Terminated), `1` = committable (Active / Partially Committed), `-1` = doomed (Failed). `@@TRANCOUNT` tracks nesting depth for nested transactions.
+
+---
+
+### B8. Isolation Levels and Read Phenomena
+
+| Step | Action | What to show |
+|------|--------|-------------|
+| 1 | `DBCC USEROPTIONS` | Show current session isolation level (default: READ COMMITTED) |
+| 2 | `SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED` → `SELECT ... WHERE PatientID = 9999` | Allows dirty reads (no S locks acquired) |
+| 3 | `SET TRANSACTION ISOLATION LEVEL READ COMMITTED` → same `SELECT` | Default level — blocks if row has uncommitted X lock |
+| 4 | `SET TRANSACTION ISOLATION LEVEL REPEATABLE READ` → `BEGIN TRAN` → two identical `SELECT`s → `COMMIT` | Both reads guaranteed identical — S locks held until COMMIT |
+| 5 | `SET TRANSACTION ISOLATION LEVEL SERIALIZABLE` → `BEGIN TRAN` → `SELECT COUNT(*) WHERE PatientID BETWEEN 9000 AND 9999` → `COMMIT` | Range lock prevents phantom inserts in [9000, 9999] |
+| 6 | Reset: `SET TRANSACTION ISOLATION LEVEL READ COMMITTED` | Restore default |
+
+**Anomaly prevention matrix (Schedules & Recoverability):**
+
+| Isolation Level | Dirty Read | Non-Repeatable Read | Phantom Read |
+|-----------------|-----------|-------------------|-------------|
+| READ UNCOMMITTED | Allowed | Allowed | Allowed |
+| READ COMMITTED | Prevented | Allowed | Allowed |
+| REPEATABLE READ | Prevented | Prevented | Allowed |
+| SERIALIZABLE | Prevented | Prevented | Prevented |
+| SNAPSHOT (SQL Server) | Prevented | Prevented | Prevented |
+
+**Theory link (Characterizing Schedules — Recoverability & Transaction Support in SQL):** Ch.4 — SQL2 defines four isolation levels that progressively prevent more concurrency anomalies. **Dirty Read**: reading uncommitted data from a failed transaction violates Isolation. **Non-repeatable Read**: same query returns different values within one transaction. **Phantom Read**: new rows appear in a range query within one transaction. A **recoverable schedule** requires that if T₂ reads a value written by T₁, then T₁ must commit before T₂ commits. SQL Server enforces this via its lock-based protocol: READ COMMITTED prevents dirty reads (recoverable), SERIALIZABLE prevents all anomalies (strict schedules). **SNAPSHOT** (SQL Server extension) uses MVCC row versioning to prevent all three anomalies without blocking.
+
+---
+
+### B9. Theory vs. Practice — Transaction Processing (Ch.4)
+
+| Aspect | Theory (Textbook Ch.4) | SQL Server Practice |
+|--------|----------------------|-------------------|
+| **Transaction Definition** | Logical unit of DB processing with read/write ops, bounded by `begin_transaction` / `end_transaction`. | `BEGIN TRAN` ... `COMMIT` / `ROLLBACK`. Each SQL statement is also atomic on its own (autocommit). |
+| **ACID — Atomicity** | All operations execute or none do. | `ROLLBACK` undoes all; `XACT_ABORT` + `TRY`/`CATCH` enforces. Demo B2 proved zero partial records. |
+| **ACID — Consistency** | Transaction takes DB from one consistent state to another. | PK / FK / CHECK constraints enforced at statement level. `FK_Patient` prevents orphan images. |
+| **ACID — Isolation** | Transaction appears to execute in isolation from others. | 5 isolation levels (READ UNCOMMITTED → SNAPSHOT). Default: READ COMMITTED. |
+| **ACID — Durability** | Committed changes must never be lost. | WAL ensures log records written to disk BEFORE commit returns. `.ldf` file on persistent storage. |
+| **Transaction States** | Active → Partially Committed → Committed, or Active/PartCommit → Failed → Terminated. | `XACT_STATE()`: `1` = committable, `-1` = uncommittable (failed), `0` = no transaction. Demo B7. |
+| **System Log** | `[start_transaction, T]`, `[write_item, T, X, old, new]`, `[commit, T]`, `[abort, T]`. | `sys.fn_dblog()`: `LOP_BEGIN_XACT`, `LOP_MODIFY_ROW`, `LOP_COMMIT_XACT`, `LOP_ABORT_XACT`. Demo B6. |
+| **Recovery (Undo/Redo)** | Undo: trace backward, restore old values. Redo: trace forward, apply new values. | ARIES-based recovery: Analysis → Redo → Undo phases on crash restart. Automatic. |
+| **Schedules & Serializability** | Serial schedule: all ops of T consecutive. Serializable: equivalent to some serial schedule. | SQL Server uses **Strict 2PL** (locks held until commit) to guarantee serializability at SERIALIZABLE level. |
+| **Conflict Serializability** | Two operations conflict if: different transactions, same data item, at least one is a write. A schedule is conflict-serializable if its precedence graph is acyclic. | Lock compatibility matrix: S-S compatible, S-X conflict, X-X conflict. `sys.dm_tran_locks` shows lock state. Strict 2PL guarantees conflict-serializable schedules. |
+| **Recoverable Schedules** | If T₂ reads a value written by T₁, T₁ must commit before T₂ commits. Cascading rollback: abort of T₁ forces abort of T₂. | READ COMMITTED (default) prevents dirty reads → guarantees recoverability. Strict 2PL holds write locks until commit → prevents cascading rollbacks (ACA). |
+| **Isolation Levels (SQL2)** | READ UNCOMMITTED, READ COMMITTED, REPEATABLE READ, SERIALIZABLE. | Same 4 levels + SNAPSHOT (MVCC via row versioning in tempdb). `SET TRANSACTION ISOLATION LEVEL`. |
+| **Dirty / Non-Repeatable / Phantom** | Violation table: each level prevents progressively more anomalies. | Same behavior in SQL Server. SNAPSHOT additionally prevents all 3 via row versioning without blocking. |
+| **Savepoint / Partial Undo** | "undo applies to single operation rather than whole transaction." | `SAVE TRANSACTION <name>` + `ROLLBACK TRANSACTION <name>`. Demo B3. |
+| **Implicit vs Explicit** | SQL2: no explicit `BEGIN`, transactions start implicitly. | SQL Server default: AUTOCOMMIT. `SET IMPLICIT_TRANSACTIONS ON` matches SQL2 behavior. Demo B5. |
+
+---
+
+**Summary for presentation:**
+- SQL Server transactions implement the full **ACID** property set from Ch.4
+- **Transaction states** (Active → Committed/Failed → Terminated) map directly to `XACT_STATE()` values (1, -1, 0)
+- The **system log** (`sys.fn_dblog()`) is the practical implementation of the textbook's WAL protocol, with log operation types mapping 1:1 to theory
+- **Conflict serializability** is guaranteed at SERIALIZABLE isolation via Strict 2PL; lower levels trade safety for concurrency
+- **Recoverable schedules** are ensured by default (READ COMMITTED prevents dirty reads); cascadeless schedules come from holding write locks until commit
+- SQL Server extends the SQL2 standard with **SNAPSHOT isolation** (MVCC) and **explicit BEGIN TRAN** syntax
+- **Savepoints** provide the textbook's partial undo capability for fine-grained error recovery
 
 ---
 
