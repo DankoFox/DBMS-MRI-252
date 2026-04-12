@@ -552,15 +552,3 @@
 | D4. Presentation slides | ~15–20 slides for 30-min presentation. Architecture diagram, live demo flow, key findings, Q&A preparation. |
 | D5. Q&A prep | Prepare answers for likely questions: Why SQL Server 2025? Why VECTOR type over application-side search? How does DiskANN compare to brute-force KNN? What isolation level would you use in production? |
 
-
-## Files To Be Created
-
-| File | Owner | Status |
-|------|-------|--------|
-| `sql/02_indexes.sql` | Member A | **Created** |
-| `sql/03_query_processing.sql` | Member A | **Created** |
-| `sql/04_transactions.sql` | Member B | Not started |
-| `sql/05_concurrency.sql` | Member C | **Created** |
-| `src/app_queries.py` | Member A | Not started |
-| Report (PDF) | Member D | Not started |
-| Slides | Member D | Not started |
