@@ -320,57 +320,33 @@ GO
       [read_item, T, X]
       [commit, T]
       [abort, T]
-    "The log is kept on disk → not affected by any type of failure 
-     except for disk or catastrophic failure."
-  
-  THEORY (Slide 25 — Recovery using log records):
-    "undo the effect by tracing backward through the log"
-    "redo the effect by tracing forward through the log"
   
   SQL SERVER PRACTICE:
-    - Transaction log (.ldf file) implements WAL
     - sys.fn_dblog(NULL, NULL) reads the active log
     - Log operations map to theory:
         LOP_BEGIN_XACT     → [start_transaction, T]
-        LOP_MODIFY_ROW     → [write_item, T, X, old, new]
+        LOP_INSERT_ROWS     → [write_item, T, X, _, new]
         LOP_COMMIT_XACT    → [commit, T]
-        LOP_ABORT_XACT     → [abort, T]
-    - SQL Server crash recovery uses ARIES algorithm:
-        Phase 1: Analysis (scan log to find active transactions)
-        Phase 2: Redo     (replay committed ops not yet on disk)
-        Phase 3: Undo     (rollback uncommitted transactions)
 =============================================================================*/
 
 PRINT '========== DEMO 6: Transaction Log — WAL in Practice ==========';
 
--- Step 1: Insert a checkpoint to have a clean starting point
-CHECKPOINT;
+-- Step 1: Perform a transaction and capture its Transaction ID
+DECLARE @MyTranID NVARCHAR(20);
 
--- Step 2: Perform a transaction that we can trace in the log
 BEGIN TRANSACTION;
-
     INSERT INTO Patients (PatientID, ClinicalNotes)
-    VALUES (4444, N'WAL demo: this write is logged before data page flush');
-
+    VALUES (4444, N'WAL demo: precise log capture');
+    
+    -- Capture the ID of the current active transaction
+    SELECT TOP 1 @MyTranID = [Transaction ID] 
+    FROM sys.fn_dblog(NULL, NULL) 
+    WHERE [Operation] = 'LOP_BEGIN_XACT' 
+    ORDER BY [Current LSN] DESC;
 COMMIT TRANSACTION;
 
--- Step 3: Read the transaction log to see the log records
--- Theory mapping: each row here corresponds to a log record type
-SELECT TOP 20
-    [Current LSN],
-    [Transaction ID],
-    [Operation],           -- Maps to theory: LOP_BEGIN_XACT, LOP_MODIFY_ROW, etc.
-    [Context],
-    [Transaction Name],
-    [Description],
-    [AllocUnitName]        -- Shows which table was affected
-FROM sys.fn_dblog(NULL, NULL)
-WHERE [Transaction Name] IS NOT NULL 
-   OR [AllocUnitName] LIKE '%Patient%'
-ORDER BY [Current LSN] DESC;
-
--- Step 4: Show a more focused view — just the transaction lifecycle
-PRINT 'Transaction lifecycle in the log (theory → practice mapping):';
+-- Step 2: Show the precise lifecycle of THIS transaction only
+PRINT 'Transaction Lifecycle in Log (Filtered by ID: ' + @MyTranID + ')';
 SELECT 
     [Current LSN],
     [Operation],
@@ -380,19 +356,14 @@ SELECT
         WHEN 'LOP_ABORT_XACT'   THEN '→ Theory: [abort, T]'
         WHEN 'LOP_MODIFY_ROW'   THEN '→ Theory: [write_item, T, X, old, new]'
         WHEN 'LOP_INSERT_ROWS'  THEN '→ Theory: [write_item, T, X, _, new]'
-        WHEN 'LOP_DELETE_ROWS'  THEN '→ Theory: [write_item, T, X, old, _]'
-        ELSE '→ Internal operation'
+        ELSE '→ Internal log record'
     END AS TheoryMapping,
-    [Transaction Name],
     [AllocUnitName]
 FROM sys.fn_dblog(NULL, NULL)
-WHERE [Operation] IN (
-    'LOP_BEGIN_XACT', 'LOP_COMMIT_XACT', 'LOP_ABORT_XACT',
-    'LOP_MODIFY_ROW', 'LOP_INSERT_ROWS', 'LOP_DELETE_ROWS'
-)
-ORDER BY [Current LSN] DESC;
+WHERE [Transaction ID] = @MyTranID
+ORDER BY [Current LSN] ASC;
 
-PRINT 'DEMO 6 COMPLETE: Transaction log records shown. WAL principle verified.';
+PRINT 'DEMO 6 COMPLETE: Transaction log records mapped to theory.';
 GO
 
 
@@ -455,7 +426,7 @@ GO
 
 
 /*=============================================================================
-  DEMO 8: Isolation Levels and Read Phenomena
+  DEMO 8: Isolation Levels — Concurrency Anomalies
   
   THEORY (Elmasri Ch.4, Slides 61-65):
     SQL2 Isolation Levels and their violations:
@@ -468,80 +439,53 @@ GO
     | SERIALIZABLE       | No         | No                 | No      |
   
   THEORY (Slides 9, 12 — Concurrency problems):
-    - Lost Update: two transactions interleave writes → one lost
-    - Dirty Read: read uncommitted data from failed transaction
-    - Incorrect Summary: aggregate reads mix of old/new values  
-    - Unrepeatable Read: same read returns different values
-  
-  SQL SERVER PRACTICE:
-    - Same 4 levels as SQL2, PLUS: SNAPSHOT (MVCC via row versioning)
-    - Default isolation: READ COMMITTED
-    - SET TRANSACTION ISOLATION LEVEL <level> changes for the session
-    - Below: single-session demos showing the CONCEPT of each level
-      (multi-session demos require two SSMS windows — see comments)
+    - Dirty Read: reading uncommitted data from a failed/active transaction.
+    - Nonrepeatable Read: same row read twice returns different values.
+    - Phantom Read: same range query returns different number of rows.
 =============================================================================*/
 
-PRINT '========== DEMO 8: Isolation Levels ==========';
+PRINT '========== DEMO 8: Isolation Levels — Concurrency Anomalies ==========';
 
--- Show current isolation level
-DBCC USEROPTIONS;
-
-/*-- 8a. READ UNCOMMITTED — Allows Dirty Reads
--- ============================================
--- This requires TWO sessions. Instructions:
-
--- SESSION 1 (run this):
-    BEGIN TRANSACTION;
-    UPDATE Patients SET ClinicalNotes = N'DIRTY VALUE - uncommitted!' 
-    WHERE PatientID = 9999;
-    -- DO NOT COMMIT YET. Switch to Session 2.
-
--- SESSION 2 (run this in another window):
-    SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-    SELECT PatientID, ClinicalNotes FROM Patients WHERE PatientID = 9999;
-    -- ^^^ Will see 'DIRTY VALUE - uncommitted!' even though Session 1 
-    -- hasn't committed. This is a DIRTY READ.
-
--- SESSION 1 (come back and run):
-    ROLLBACK;
-    -- The dirty value is gone. Session 2 read data that never existed.
+/* 
+   HOW TO RUN THESE DEMOS (Requires 2 Windows/Sessions):
+   
+   8a. DIRTY READ (Allowed in READ UNCOMMITTED)
+   ----------------------------------------------------
+   [Session 1 (Writer)]: 
+       BEGIN TRAN; UPDATE Patients SET ClinicalNotes = 'Dirty' WHERE PatientID = 1; 
+       WAITFOR DELAY '00:00:10'; ROLLBACK;
+   [Session 2 (Reader)]: 
+       SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED; 
+       SELECT ClinicalNotes FROM Patients WHERE PatientID = 1; -- Sees 'Dirty'
+   
+   8b. NON-REPEATABLE READ (Allowed in READ COMMITTED)
+   ----------------------------------------------------
+   [Session 1 (Reader)]: 
+       BEGIN TRAN; SELECT PatientID, ClinicalNotes FROM Patients WHERE PatientID = 1;
+       WAITFOR DELAY '00:00:10'; 
+       SELECT PatientID, ClinicalNotes FROM Patients WHERE PatientID = 1; -- Sees DIFFERENT value
+   [Session 2 (Writer)]: 
+       UPDATE Patients SET ClinicalNotes = 'Updated' WHERE PatientID = 1; -- Succeeds instantly
+   
+   8c. PHANTOM READ (Allowed in REPEATABLE READ)
+   ----------------------------------------------------
+   [Session 1 (Reader)]: 
+       BEGIN TRAN; SELECT COUNT(*) FROM Patients WHERE PatientID > 1000;
+       WAITFOR DELAY '00:00:10'; 
+       SELECT COUNT(*) FROM Patients WHERE PatientID > 1000; -- Count CHANGES
+   [Session 2 (Writer)]: 
+       INSERT INTO Patients (PatientID, ClinicalNotes) VALUES (2000, 'Phantom'); -- Succeeds
 */
 
--- 8b. Single-session demonstration of isolation level syntax
-PRINT '--- Setting READ UNCOMMITTED ---';
-SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-SELECT 'READ UNCOMMITTED' AS IsolationLevel, PatientID, ClinicalNotes 
-FROM Patients WHERE PatientID = 9999;
-
-PRINT '--- Setting READ COMMITTED (default) ---';
-SET TRANSACTION ISOLATION LEVEL READ COMMITTED;
-SELECT 'READ COMMITTED' AS IsolationLevel, PatientID, ClinicalNotes 
-FROM Patients WHERE PatientID = 9999;
-
-PRINT '--- Setting REPEATABLE READ ---';
-SET TRANSACTION ISOLATION LEVEL REPEATABLE READ;
-BEGIN TRANSACTION;
-    SELECT 'REPEATABLE READ - 1st read' AS IsolationLevel, PatientID, ClinicalNotes 
-    FROM Patients WHERE PatientID = 9999;
-    -- Between these two reads, no other transaction can UPDATE this row
-    SELECT 'REPEATABLE READ - 2nd read' AS IsolationLevel, PatientID, ClinicalNotes 
-    FROM Patients WHERE PatientID = 9999;
-    -- Both reads return the same value (guaranteed)
-COMMIT;
-
-PRINT '--- Setting SERIALIZABLE ---';
+-- Single-session syntax verification
+PRINT '--- Syntax Verification ---';
+DBCC USEROPTIONS; -- Show current isolation level
 SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;
-BEGIN TRANSACTION;
-    -- Under SERIALIZABLE, range locks prevent phantom inserts
-    SELECT 'SERIALIZABLE' AS IsolationLevel, COUNT(*) AS PatientCount 
-    FROM Patients WHERE PatientID BETWEEN 9000 AND 9999;
-    -- No other transaction can INSERT a PatientID in [9000, 9999] range
-COMMIT;
-
--- Reset to default
+PRINT 'Isolation Level set to SERIALIZABLE (Highest)';
 SET TRANSACTION ISOLATION LEVEL READ COMMITTED;
+PRINT 'Isolation Level restored to READ COMMITTED (Default)';
 
-PRINT 'DEMO 8 COMPLETE: All isolation levels demonstrated.';
+PRINT 'DEMO 8 COMPLETE: All anomaly simulations documented in script comments.';
 GO
 
 
